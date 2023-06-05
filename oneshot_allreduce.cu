@@ -70,6 +70,15 @@ struct AllReduceParams {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+static inline __device__ uint32_t hadd4(const uint32_t& a, const uint32_t& b)
+{
+    uint32_t c;
+    asm volatile("add.u32 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+    return c;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 static inline __device__ uint32_t hadd2(const uint32_t& a, const uint32_t& b)
 {
     uint32_t c;
@@ -127,6 +136,17 @@ struct ARTypeConverter<__nv_bfloat16> {
 // add two 128b data
 template<typename T_IN, typename T_COMP>
 inline __device__ T_IN add128b(T_IN a, T_IN b);
+
+template<>
+inline __device__ uint4 add128b<uint4, uint8_t>(uint4 a, uint4 b)
+{
+    uint4 c; // 128bit
+    c.x = hadd4(a.x, b.x); // process 32bit which is 4 uint8_t
+    c.y = hadd4(a.y, b.y);
+    c.z = hadd4(a.z, b.z);
+    c.w = hadd4(a.w, b.w);
+    return c;
+}
 
 template<>
 inline __device__ uint4 add128b<uint4, uint16_t>(uint4 a, uint4 b)
@@ -193,7 +213,12 @@ static __global__ void oneShotAllReduceKernel(AllReduceParams<T> params)
     const int tidx = threadIdx.x;
 
     // The number of elements packed into one for comms
-    static constexpr int NUM_ELTS = std::is_same<T, uint32_t>::value ? 4 : 8;
+    static int NUM_ELTS = 8;
+    if(std::is_same<T, uint32_t>::value) {
+        NUM_ELTS = 4;
+    } else if (std::is_same<T, uint8_t>::value) {
+        NUM_ELTS = 16;
+    }
 
     // Packed data type for comms
     using PackedType = typename ARTypeConverter<T>::Type;
@@ -353,7 +378,7 @@ static __global__ void twoShotAllReduceKernel(AllReduceParams<T> params)
 void kernelLaunchConfig(
     int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, size_t data_type_bytes)
 {
-    assert(data_type_bytes == 2 || data_type_bytes == 4);
+    //assert(data_type_bytes == 2 || data_type_bytes == 4);
     // NOTE: need to support FP16 and FP32
     size_t elts_per_thread = 16 / data_type_bytes;
     size_t elts_per_warp   = (16 * WARP_SIZE) / data_type_bytes;
@@ -438,6 +463,8 @@ void invokeOneOrTwoShotAllReduceKernel(AllReduceParams<T>& param, cudaStream_t s
         param.rank_offset    = param.rank * param.elts_per_rank;
         twoShotAllReduceKernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(param);
     }
+
+
 }
 
 template<typename T>
@@ -475,7 +502,7 @@ public:
 
     void allocateAndExchangePeerAccessPointer(
         std::vector<std::shared_ptr<CustomAllReduceComm>>* custom_all_reduce_comms){
-        printf("size is: %ld \n", custom_all_reduce_comms->size()); 
+        //printf("size is: %ld \n", custom_all_reduce_comms->size()); 
         assert(custom_all_reduce_comms->size() == rank_size_);
         assert(rank_ == 0);
         // Enable Peer to Peer Access
@@ -607,8 +634,8 @@ void initCustomAllReduceComm(std::vector<std::shared_ptr<CustomAllReduceComm<T>>
 template<typename T>
 void test(){
     int num_gpu = 8; 
-    int mem_size = 32; // MB
-    size_t elem_num = (mem_size / sizeof(T)) * 1024 * 1024; 
+    int mem_size = 96; // 192 for 16bit decoder nccl in 105b, 96 for 8bit decoder nccl
+    size_t elem_num = (mem_size / sizeof(T)) * 1024; 
     std::vector<cudaStream_t> stream_vec{}; 
     for(int i = 0; i < num_gpu; i++){
         cudaSetDevice(i); 
@@ -620,7 +647,7 @@ void test(){
     std::vector<std::shared_ptr<CustomAllReduceComm<T>>> custom_all_reduce_comms{}; 
 
     initCustomAllReduceComm<T>(&custom_all_reduce_comms, true/*enable_custom_all_reduce*/, num_gpu); 
-    printf("Init end\n"); 
+    //printf("Init end\n"); 
 
     std::vector<T*> data_vec{}; 
     for(int i = 0; i < num_gpu; i++){
@@ -629,19 +656,23 @@ void test(){
         cudaMalloc(&x, sizeof(T) * elem_num); 
         data_vec.push_back(x); 
     }
-    printf("Malloc end\n"); 
+    //printf("Malloc end\n"); 
 
     for(int i = 0; i < num_gpu; i++){
         cudaSetDevice(i); 
         custom_all_reduce_comms[i]->swapInternalBuffer(data_vec[i], elem_num); 
     }
-    printf("swap buffer end\n"); 
+    //printf("swap buffer end\n"); 
 
 
-    for(int i = 0; i < num_gpu; i++){
-        cudaSetDevice(i); 
-        custom_all_reduce_comms[i]->customAllReduce(elem_num, stream_vec[i]); 
+    int steps = 100;
+    for (int step=0; step<steps; ++step) {
+        for(int i = 0; i < num_gpu; i++){
+            cudaSetDevice(i); 
+            custom_all_reduce_comms[i]->customAllReduce(elem_num, stream_vec[i]); 
+        }
     }
+
 
     for(int i = 0; i < num_gpu; i++){
         cudaSetDevice(i); 
@@ -656,5 +687,5 @@ void test(){
 }
 
 int main(){
-    test<uint32_t>(); 
+    test<uint8_t>(); 
 }
