@@ -284,7 +284,12 @@ static __global__ void twoShotAllReduceKernel(AllReduceParams<T> params)
     const int tidx = threadIdx.x;
 
     // The number of elements packed into one for comms
-    static constexpr int NUM_ELTS = std::is_same<T, uint32_t>::value ? 4 : 8;
+    static int NUM_ELTS = 8;
+    if(std::is_same<T, uint32_t>::value) {
+        NUM_ELTS = 4;
+    } else if (std::is_same<T, uint8_t>::value) {
+        NUM_ELTS = 16;
+    }
 
     // Packed data type for comms
     using PackedType = typename ARTypeConverter<T>::Type;
@@ -634,7 +639,7 @@ void initCustomAllReduceComm(std::vector<std::shared_ptr<CustomAllReduceComm<T>>
 template<typename T>
 void test(){
     int num_gpu = 8; 
-    int mem_size = 96; // 192 for 16bit decoder nccl in 105b, 96 for 8bit decoder nccl
+    int mem_size = 288; // 192 for 16bit decoder nccl in 105b, 96 for 8bit decoder nccl
     size_t elem_num = (mem_size / sizeof(T)) * 1024; 
     std::vector<cudaStream_t> stream_vec{}; 
     for(int i = 0; i < num_gpu; i++){
